@@ -162,6 +162,39 @@ impl<'a> Executor<'a> {
                 Ok(Value::Bool(!Self::is_truthy(&value)))
             }
 
+            // Validation operator
+            Operator::Validate(op) => {
+                // 1. Evaluate the data to be validated
+                let data = self.eval(context, &op.data)?;
+
+                // 2. Compile the JSON Schema validator
+                let validator = jsonschema::validator_for(&op.schema)
+                    .map_err(|e| ExecutionError::custom(format!("Failed to compile schema: {}", e)))?;
+
+                // 3. Validate the data
+                if validator.is_valid(&data) {
+                    // Valid: return the data unchanged
+                    Ok(data)
+                } else {
+                    // Collect all error messages
+                    let error_messages: Vec<String> = validator
+                        .iter_errors(&data)
+                        .map(|e| e.to_string())
+                        .collect();
+
+                    // If onFail is specified, evaluate it
+                    if let Some(on_fail) = &op.on_fail {
+                        return self.eval(context, on_fail);
+                    }
+
+                    // Otherwise, return ValidationError
+                    Err(ExecutionError::validation_error(
+                        "Validation failed",
+                        error_messages
+                    ))
+                }
+            }
+
             // TODO: Implement remaining operators
             _ => Err(ExecutionError::custom(format!(
                 "Operator not yet implemented: {:?}",
@@ -1186,5 +1219,379 @@ mod tests {
             ],
         };
         assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    // $validate operator tests
+
+    #[test]
+    fn test_eval_validate_success() {
+        let (executor, context) = create_test_executor();
+
+        // Valid data should pass and return the data
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"name": "Alice", "age": 30})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "number"}
+                },
+                "required": ["name", "age"]
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        assert_eq!(result, json!({"name": "Alice", "age": 30}));
+    }
+
+    #[test]
+    fn test_eval_validate_failure_no_on_fail() {
+        let (executor, context) = create_test_executor();
+
+        // Invalid data without onFail should return ValidationError
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"name": "Alice"})), // missing "age"
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "number"}
+                },
+                "required": ["name", "age"]
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ExecutionError::ValidationError { .. }));
+    }
+
+    #[test]
+    fn test_eval_validate_failure_with_on_fail() {
+        let (executor, context) = create_test_executor();
+
+        // Invalid data with onFail should return the onFail result
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"name": 123})), // wrong type
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+            on_fail: Some(OperatorValue::Literal(json!({"error": "validation failed"}))),
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        assert_eq!(result, json!({"error": "validation failed"}));
+    }
+
+    #[test]
+    fn test_eval_validate_string_constraints() {
+        let (executor, context) = create_test_executor();
+
+        // Test string minLength constraint
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"title": ""})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "minLength": 1}
+                },
+                "required": ["title"]
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ExecutionError::ValidationError { .. }));
+    }
+
+    #[test]
+    fn test_eval_validate_number_constraints() {
+        let (executor, context) = create_test_executor();
+
+        // Test number minimum constraint - should pass
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"price": 10})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "price": {"type": "number", "minimum": 0}
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_ok());
+
+        // Test number minimum constraint - should fail
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"price": -5})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "price": {"type": "number", "minimum": 0}
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_validate_enum() {
+        let (executor, context) = create_test_executor();
+
+        // Valid enum value
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"status": "active"})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["active", "inactive", "pending"]}
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_ok());
+
+        // Invalid enum value
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"status": "unknown"})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["active", "inactive", "pending"]}
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_validate_array_constraints() {
+        let (executor, context) = create_test_executor();
+
+        // Test array minItems constraint - should pass
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"tags": ["a", "b"]})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "tags": {"type": "array", "minItems": 1}
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_ok());
+
+        // Test array minItems constraint - should fail
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"tags": []})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "tags": {"type": "array", "minItems": 1}
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_validate_nested_object() {
+        let (executor, context) = create_test_executor();
+
+        // Valid nested object
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({
+                "user": {
+                    "name": "Alice",
+                    "address": {
+                        "city": "NYC",
+                        "zip": "10001"
+                    }
+                }
+            })),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "user": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "address": {
+                                "type": "object",
+                                "properties": {
+                                    "city": {"type": "string"},
+                                    "zip": {"type": "string"}
+                                },
+                                "required": ["city", "zip"]
+                            }
+                        },
+                        "required": ["name", "address"]
+                    }
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_ok());
+
+        // Invalid nested object (missing zip)
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({
+                "user": {
+                    "name": "Alice",
+                    "address": {
+                        "city": "NYC"
+                    }
+                }
+            })),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "user": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "address": {
+                                "type": "object",
+                                "properties": {
+                                    "city": {"type": "string"},
+                                    "zip": {"type": "string"}
+                                },
+                                "required": ["city", "zip"]
+                            }
+                        },
+                        "required": ["name", "address"]
+                    }
+                }
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_validate_with_nested_data_operator() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("requestBody", json!({"title": "Test Post"}));
+
+        // Validate data from context
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "requestBody".to_string(),
+            }))),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "minLength": 1}
+                },
+                "required": ["title"]
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        assert_eq!(result, json!({"title": "Test Post"}));
+    }
+
+    #[test]
+    fn test_eval_validate_with_nested_on_fail_operator() {
+        let (executor, context) = create_test_executor();
+
+        // onFail evaluates a nested operator
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"invalid": true})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+            on_fail: Some(OperatorValue::Operator(Box::new(Operator::Merge(MergeOp {
+                objects: vec![
+                    OperatorValue::Literal(json!({"status": 400})),
+                    OperatorValue::Literal(json!({"error": "Invalid input"})),
+                ],
+            })))),
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        assert_eq!(result, json!({"status": 400, "error": "Invalid input"}));
+    }
+
+    #[test]
+    fn test_eval_validate_multiple_errors() {
+        let (executor, context) = create_test_executor();
+
+        // Data with multiple validation errors
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"name": 123, "age": "invalid"})),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "number"},
+                    "email": {"type": "string"}
+                },
+                "required": ["name", "age", "email"]
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+
+        // ValidationError should collect all errors
+        match result.unwrap_err() {
+            ExecutionError::ValidationError { errors, .. } => {
+                // Should have multiple errors (type mismatches + missing required field)
+                assert!(errors.len() >= 2);
+            }
+            _ => panic!("Expected ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_eval_validate_invalid_schema() {
+        let (executor, context) = create_test_executor();
+
+        // Invalid JSON Schema (missing "type" at root level may cause issues)
+        // This schema is actually valid in JSON Schema, so let's use a truly invalid one
+        let op = Operator::Validate(ValidateOp {
+            data: OperatorValue::Literal(json!({"name": "Alice"})),
+            schema: json!({
+                "type": "invalid_type"  // This is not a valid JSON Schema type
+            }),
+            on_fail: None,
+        });
+
+        let result = executor.eval_operator(&context, &op);
+        // Schema compilation should fail
+        assert!(result.is_err());
     }
 }

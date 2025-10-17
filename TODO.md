@@ -56,7 +56,7 @@ This document tracks the implementation status of the deck declarative web serve
 - ✅ `$now` - Get current timestamp
 - ⏸️ `$renderString` - Template string rendering (e.g., `"Hello {{name}}"`)
 - ⏸️ `$return` - Early return from pipeline
-- ⏸️ `$validate` - JSON Schema validation
+- ✅ `$validate` - JSON Schema validation
 
 ### Comparison Operators
 - ✅ `$eq` - Equality
@@ -133,7 +133,7 @@ This document tracks the implementation status of the deck declarative web serve
 ## Validation
 
 - ✅ JSON Schema types defined
-- ⏸️ JSON Schema validation implementation
+- ✅ JSON Schema validation implementation (`$validate` operator)
 - ⏸️ Database schema validation
 - ⏸️ Config validation at startup
 
@@ -144,7 +144,7 @@ This document tracks the implementation status of the deck declarative web serve
 ### Unit Tests
 - ✅ Context path resolution (10 tests)
 - ✅ ExecutionError types (5 tests)
-- ✅ Executor basics (50 tests - includes comparison and logical operators)
+- ✅ Executor basics (62 tests - includes comparison, logical, and validation operators)
 - ⏸️ All operator implementations
 - ⏸️ Database operations
 - ⏸️ Middleware execution
