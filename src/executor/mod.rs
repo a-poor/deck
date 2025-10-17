@@ -195,6 +195,86 @@ impl<'a> Executor<'a> {
                 }
             }
 
+            // Database operators
+            Operator::DbQuery(op) => {
+                // 1. Evaluate filter OperatorValues to concrete Values
+                let filter = if let Some(filter_map) = &op.filter {
+                    let mut evaluated_filter = std::collections::HashMap::new();
+                    for (key, value) in filter_map {
+                        let evaluated_value = self.eval(context, value)?;
+                        evaluated_filter.insert(key.clone(), evaluated_value);
+                    }
+                    Some(evaluated_filter)
+                } else {
+                    None
+                };
+
+                // 2. Call database provider
+                let results = self.database.query(
+                    &op.collection,
+                    filter.as_ref(),
+                    op.select.as_deref(),
+                    op.limit,
+                    op.skip,
+                    op.sort.as_ref(),
+                )?;
+
+                // 3. Return results as array
+                Ok(Value::Array(results))
+            }
+
+            Operator::DbInsert(op) => {
+                // 1. Evaluate all document OperatorValues to concrete Values
+                let mut evaluated_document = std::collections::HashMap::new();
+                for (key, value) in &op.document {
+                    let evaluated_value = self.eval(context, value)?;
+                    evaluated_document.insert(key.clone(), evaluated_value);
+                }
+
+                // 2. Call database provider to insert
+                let inserted = self.database.insert(&op.collection, &evaluated_document)?;
+
+                // 3. Return the inserted document (includes generated _id)
+                Ok(inserted)
+            }
+
+            Operator::DbUpdate(op) => {
+                // 1. Evaluate filter OperatorValues
+                let mut evaluated_filter = std::collections::HashMap::new();
+                for (key, value) in &op.filter {
+                    let evaluated_value = self.eval(context, value)?;
+                    evaluated_filter.insert(key.clone(), evaluated_value);
+                }
+
+                // 2. Evaluate update OperatorValues
+                let mut evaluated_update = std::collections::HashMap::new();
+                for (key, value) in &op.update {
+                    let evaluated_value = self.eval(context, value)?;
+                    evaluated_update.insert(key.clone(), evaluated_value);
+                }
+
+                // 3. Call database provider to update
+                let updated = self.database.update(&op.collection, &evaluated_filter, &evaluated_update)?;
+
+                // 4. Return updated documents as array
+                Ok(Value::Array(updated))
+            }
+
+            Operator::DbDelete(op) => {
+                // 1. Evaluate filter OperatorValues
+                let mut evaluated_filter = std::collections::HashMap::new();
+                for (key, value) in &op.filter {
+                    let evaluated_value = self.eval(context, value)?;
+                    evaluated_filter.insert(key.clone(), evaluated_value);
+                }
+
+                // 2. Call database provider to delete
+                let deleted = self.database.delete(&op.collection, &evaluated_filter)?;
+
+                // 3. Return deleted documents as array (for audit trail)
+                Ok(Value::Array(deleted))
+            }
+
             // TODO: Implement remaining operators
             _ => Err(ExecutionError::custom(format!(
                 "Operator not yet implemented: {:?}",
@@ -1593,5 +1673,1025 @@ mod tests {
         let result = executor.eval_operator(&context, &op);
         // Schema compilation should fail
         assert!(result.is_err());
+    }
+
+    // Database operator tests - $dbQuery
+
+    #[test]
+    fn test_eval_dbquery_all_documents() {
+        // Create executor with database containing test data
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First Post", "views": 100}),
+                json!({"_id": "2", "title": "Second Post", "views": 200}),
+                json!({"_id": "3", "title": "Third Post", "views": 150}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query all documents (no filter)
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 3);
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_simple_filter() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First Post", "status": "published"}),
+                json!({"_id": "2", "title": "Second Post", "status": "draft"}),
+                json!({"_id": "3", "title": "Third Post", "status": "published"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query with simple equality filter
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("published")));
+
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: Some(filter),
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+        assert!(result_array.iter().all(|doc|
+            doc.get("status").unwrap() == &json!("published")
+        ));
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_dynamic_filter() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First Post", "authorId": "user123"}),
+                json!({"_id": "2", "title": "Second Post", "authorId": "user456"}),
+                json!({"_id": "3", "title": "Third Post", "authorId": "user123"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new().with_var("currentUserId", json!("user123"));
+
+        // Query with dynamic filter using $get operator
+        let mut filter = std::collections::HashMap::new();
+        filter.insert(
+            "authorId".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "currentUserId".to_string(),
+            }))),
+        );
+
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: Some(filter),
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+        assert!(result_array.iter().all(|doc|
+            doc.get("authorId").unwrap() == &json!("user123")
+        ));
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_multiple_filters() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First", "status": "published", "featured": true}),
+                json!({"_id": "2", "title": "Second", "status": "published", "featured": false}),
+                json!({"_id": "3", "title": "Third", "status": "draft", "featured": true}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query with multiple fields (implicit AND)
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("published")));
+        filter.insert("featured".to_string(), OperatorValue::Literal(json!(true)));
+
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: Some(filter),
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 1);
+        assert_eq!(result_array[0].get("_id").unwrap(), &json!("1"));
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_limit() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First"}),
+                json!({"_id": "2", "title": "Second"}),
+                json!({"_id": "3", "title": "Third"}),
+                json!({"_id": "4", "title": "Fourth"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query with limit
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: Some(2),
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_skip() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First"}),
+                json!({"_id": "2", "title": "Second"}),
+                json!({"_id": "3", "title": "Third"}),
+                json!({"_id": "4", "title": "Fourth"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query with skip
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: None,
+            skip: Some(2),
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+        assert_eq!(result_array[0].get("_id").unwrap(), &json!("3"));
+        assert_eq!(result_array[1].get("_id").unwrap(), &json!("4"));
+    }
+
+    #[test]
+    fn test_eval_dbquery_pagination() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First"}),
+                json!({"_id": "2", "title": "Second"}),
+                json!({"_id": "3", "title": "Third"}),
+                json!({"_id": "4", "title": "Fourth"}),
+                json!({"_id": "5", "title": "Fifth"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Page 2, size 2 (skip 2, limit 2)
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: Some(2),
+            skip: Some(2),
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+        assert_eq!(result_array[0].get("_id").unwrap(), &json!("3"));
+        assert_eq!(result_array[1].get("_id").unwrap(), &json!("4"));
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_sort() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "Post C", "views": 300}),
+                json!({"_id": "2", "title": "Post A", "views": 100}),
+                json!({"_id": "3", "title": "Post B", "views": 200}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Sort by views descending
+        let mut sort = std::collections::HashMap::new();
+        sort.insert("views".to_string(), SortOrder::Descending);
+
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: None,
+            skip: None,
+            sort: Some(sort),
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 3);
+        assert_eq!(result_array[0].get("views").unwrap(), &json!(300));
+        assert_eq!(result_array[1].get("views").unwrap(), &json!(200));
+        assert_eq!(result_array[2].get("views").unwrap(), &json!(100));
+    }
+
+    #[test]
+    fn test_eval_dbquery_with_select() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First Post", "content": "Long content here", "views": 100}),
+                json!({"_id": "2", "title": "Second Post", "content": "More content", "views": 200}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Select only title and views
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: Some(vec!["title".to_string(), "views".to_string()]),
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+
+        // Each document should only have title and views
+        for doc in result_array {
+            let obj = doc.as_object().unwrap();
+            assert!(obj.contains_key("title"));
+            assert!(obj.contains_key("views"));
+            assert!(!obj.contains_key("_id"));
+            assert!(!obj.contains_key("content"));
+        }
+    }
+
+    #[test]
+    fn test_eval_dbquery_empty_results() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "First", "status": "published"}),
+                json!({"_id": "2", "title": "Second", "status": "published"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query with filter that matches nothing
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("draft")));
+
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: Some(filter),
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 0);
+    }
+
+    #[test]
+    fn test_eval_dbquery_nonexistent_collection() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Query nonexistent collection
+        let op = Operator::DbQuery(DbQueryOp {
+            collection: "nonexistent".to_string(),
+            filter: None,
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        // Should return empty array for nonexistent collection
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 0);
+    }
+
+    // Database operator tests - $dbInsert
+
+    #[test]
+    fn test_eval_dbinsert_with_literals() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Insert with literal values
+        let mut document = std::collections::HashMap::new();
+        document.insert("title".to_string(), OperatorValue::Literal(json!("New Post")));
+        document.insert("status".to_string(), OperatorValue::Literal(json!("draft")));
+
+        let op = Operator::DbInsert(DbInsertOp {
+            collection: "posts".to_string(),
+            document,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let obj = result.as_object().unwrap();
+
+        // Should have the inserted fields
+        assert_eq!(obj.get("title").unwrap(), &json!("New Post"));
+        assert_eq!(obj.get("status").unwrap(), &json!("draft"));
+
+        // Should have auto-generated _id
+        assert!(obj.contains_key("_id"));
+    }
+
+    #[test]
+    fn test_eval_dbinsert_with_operators() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new()
+            .with_var("user", json!({"id": "user123", "name": "Alice"}))
+            .with_var("title", json!("My Post"));
+
+        // Insert with operator values
+        let mut document = std::collections::HashMap::new();
+        document.insert(
+            "title".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "title".to_string(),
+            }))),
+        );
+        document.insert(
+            "authorId".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "user.id".to_string(),
+            }))),
+        );
+        document.insert(
+            "createdAt".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Now(NowOp::default()))),
+        );
+
+        let op = Operator::DbInsert(DbInsertOp {
+            collection: "posts".to_string(),
+            document,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let obj = result.as_object().unwrap();
+
+        assert_eq!(obj.get("title").unwrap(), &json!("My Post"));
+        assert_eq!(obj.get("authorId").unwrap(), &json!("user123"));
+        assert_eq!(obj.get("createdAt").unwrap(), &json!("2025-01-01T00:00:00Z"));
+        assert!(obj.contains_key("_id"));
+    }
+
+    #[test]
+    fn test_eval_dbinsert_with_provided_id() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Insert with explicit _id
+        let mut document = std::collections::HashMap::new();
+        document.insert("_id".to_string(), OperatorValue::Literal(json!("custom-id-123")));
+        document.insert("title".to_string(), OperatorValue::Literal(json!("Post with ID")));
+
+        let op = Operator::DbInsert(DbInsertOp {
+            collection: "posts".to_string(),
+            document,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let obj = result.as_object().unwrap();
+
+        // Should preserve the provided _id
+        assert_eq!(obj.get("_id").unwrap(), &json!("custom-id-123"));
+        assert_eq!(obj.get("title").unwrap(), &json!("Post with ID"));
+    }
+
+    #[test]
+    fn test_eval_dbinsert_into_new_collection() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Insert into a collection that doesn't exist yet
+        let mut document = std::collections::HashMap::new();
+        document.insert("name".to_string(), OperatorValue::Literal(json!("First User")));
+
+        let op = Operator::DbInsert(DbInsertOp {
+            collection: "users".to_string(),
+            document,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let obj = result.as_object().unwrap();
+
+        assert_eq!(obj.get("name").unwrap(), &json!("First User"));
+        assert!(obj.contains_key("_id"));
+    }
+
+    #[test]
+    fn test_eval_dbinsert_can_query_inserted() {
+        // Create a shared database to test that insert actually persists
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Insert a document
+        let mut document = std::collections::HashMap::new();
+        document.insert("title".to_string(), OperatorValue::Literal(json!("Test Post")));
+        document.insert("status".to_string(), OperatorValue::Literal(json!("published")));
+
+        let insert_op = Operator::DbInsert(DbInsertOp {
+            collection: "posts".to_string(),
+            document,
+            validate: false,
+        });
+
+        let inserted = executor.eval_operator(&context, &insert_op).unwrap();
+        let inserted_obj = inserted.as_object().unwrap();
+        let inserted_id = inserted_obj.get("_id").unwrap();
+
+        // Query the same collection
+        let query_op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let results = executor.eval_operator(&context, &query_op).unwrap();
+        let results_array = results.as_array().unwrap();
+
+        // Should find the inserted document
+        assert_eq!(results_array.len(), 1);
+        assert_eq!(results_array[0].get("_id").unwrap(), inserted_id);
+        assert_eq!(results_array[0].get("title").unwrap(), &json!("Test Post"));
+    }
+
+    #[test]
+    fn test_eval_dbinsert_with_nested_object() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Insert with nested object
+        let mut document = std::collections::HashMap::new();
+        document.insert("name".to_string(), OperatorValue::Literal(json!("Alice")));
+        document.insert(
+            "address".to_string(),
+            OperatorValue::Literal(json!({"city": "NYC", "zip": "10001"})),
+        );
+
+        let op = Operator::DbInsert(DbInsertOp {
+            collection: "users".to_string(),
+            document,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let obj = result.as_object().unwrap();
+
+        assert_eq!(obj.get("name").unwrap(), &json!("Alice"));
+        let address = obj.get("address").unwrap().as_object().unwrap();
+        assert_eq!(address.get("city").unwrap(), &json!("NYC"));
+        assert_eq!(address.get("zip").unwrap(), &json!("10001"));
+    }
+
+    #[test]
+    fn test_eval_dbinsert_with_merge() {
+        let db = Box::leak(Box::new(MockDatabase::new()));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new()
+            .with_var("defaults", json!({"status": "draft", "featured": false}))
+            .with_var("userInput", json!({"title": "My Post"}));
+
+        // Use $merge to combine defaults and user input
+        let mut document = std::collections::HashMap::new();
+        document.insert(
+            "_combined".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Merge(MergeOp {
+                objects: vec![
+                    OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "defaults".to_string(),
+                    }))),
+                    OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "userInput".to_string(),
+                    }))),
+                ],
+            }))),
+        );
+
+        let op = Operator::DbInsert(DbInsertOp {
+            collection: "posts".to_string(),
+            document,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let obj = result.as_object().unwrap();
+
+        // The _combined field should contain the merged object
+        let combined = obj.get("_combined").unwrap().as_object().unwrap();
+        assert_eq!(combined.get("status").unwrap(), &json!("draft"));
+        assert_eq!(combined.get("featured").unwrap(), &json!(false));
+        assert_eq!(combined.get("title").unwrap(), &json!("My Post"));
+    }
+
+    // Database operator tests - $dbUpdate
+
+    #[test]
+    fn test_eval_dbupdate_simple() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "Old Title", "status": "draft"}),
+                json!({"_id": "2", "title": "Another Post", "status": "published"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Update with filter and new values
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("_id".to_string(), OperatorValue::Literal(json!("1")));
+
+        let mut update = std::collections::HashMap::new();
+        update.insert("title".to_string(), OperatorValue::Literal(json!("New Title")));
+        update.insert("status".to_string(), OperatorValue::Literal(json!("published")));
+
+        let op = Operator::DbUpdate(DbUpdateOp {
+            collection: "posts".to_string(),
+            filter,
+            update,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        // Should return the updated documents
+        assert_eq!(results_array.len(), 1);
+        assert_eq!(results_array[0].get("_id").unwrap(), &json!("1"));
+        assert_eq!(results_array[0].get("title").unwrap(), &json!("New Title"));
+        assert_eq!(results_array[0].get("status").unwrap(), &json!("published"));
+    }
+
+    #[test]
+    fn test_eval_dbupdate_with_operators() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![json!({"_id": "1", "title": "Post", "views": 100})],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new().with_var("postId", json!("1"));
+
+        // Update with dynamic filter and $now
+        let mut filter = std::collections::HashMap::new();
+        filter.insert(
+            "_id".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "postId".to_string(),
+            }))),
+        );
+
+        let mut update = std::collections::HashMap::new();
+        update.insert(
+            "updatedAt".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Now(NowOp::default()))),
+        );
+
+        let op = Operator::DbUpdate(DbUpdateOp {
+            collection: "posts".to_string(),
+            filter,
+            update,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        assert_eq!(results_array.len(), 1);
+        assert_eq!(results_array[0].get("updatedAt").unwrap(), &json!("2025-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_eval_dbupdate_multiple_documents() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "status": "draft", "featured": false}),
+                json!({"_id": "2", "status": "draft", "featured": false}),
+                json!({"_id": "3", "status": "published", "featured": false}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Update all draft posts
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("draft")));
+
+        let mut update = std::collections::HashMap::new();
+        update.insert("featured".to_string(), OperatorValue::Literal(json!(true)));
+
+        let op = Operator::DbUpdate(DbUpdateOp {
+            collection: "posts".to_string(),
+            filter,
+            update,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        // Should update both draft posts
+        assert_eq!(results_array.len(), 2);
+        assert!(results_array.iter().all(|doc| doc.get("featured").unwrap() == &json!(true)));
+    }
+
+    #[test]
+    fn test_eval_dbupdate_empty_results() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![json!({"_id": "1", "status": "published"})],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Update with filter that matches nothing
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("draft")));
+
+        let mut update = std::collections::HashMap::new();
+        update.insert("title".to_string(), OperatorValue::Literal(json!("Updated")));
+
+        let op = Operator::DbUpdate(DbUpdateOp {
+            collection: "posts".to_string(),
+            filter,
+            update,
+            validate: false,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        // Should return empty array
+        assert_eq!(results_array.len(), 0);
+    }
+
+    // Database operator tests - $dbDelete
+
+    #[test]
+    fn test_eval_dbdelete_simple() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "Post 1"}),
+                json!({"_id": "2", "title": "Post 2"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Delete one document
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("_id".to_string(), OperatorValue::Literal(json!("1")));
+
+        let op = Operator::DbDelete(DbDeleteOp {
+            collection: "posts".to_string(),
+            filter,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        // Should return the deleted document
+        assert_eq!(results_array.len(), 1);
+        assert_eq!(results_array[0].get("_id").unwrap(), &json!("1"));
+        assert_eq!(results_array[0].get("title").unwrap(), &json!("Post 1"));
+    }
+
+    #[test]
+    fn test_eval_dbdelete_multiple() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "status": "draft"}),
+                json!({"_id": "2", "status": "draft"}),
+                json!({"_id": "3", "status": "published"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Delete all draft posts
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("draft")));
+
+        let op = Operator::DbDelete(DbDeleteOp {
+            collection: "posts".to_string(),
+            filter,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        // Should return both deleted documents
+        assert_eq!(results_array.len(), 2);
+        assert!(results_array.iter().all(|doc| doc.get("status").unwrap() == &json!("draft")));
+    }
+
+    #[test]
+    fn test_eval_dbdelete_with_operator_filter() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "authorId": "user123"}),
+                json!({"_id": "2", "authorId": "user456"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new().with_var("userId", json!("user123"));
+
+        // Delete with dynamic filter
+        let mut filter = std::collections::HashMap::new();
+        filter.insert(
+            "authorId".to_string(),
+            OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "userId".to_string(),
+            }))),
+        );
+
+        let op = Operator::DbDelete(DbDeleteOp {
+            collection: "posts".to_string(),
+            filter,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        assert_eq!(results_array.len(), 1);
+        assert_eq!(results_array[0].get("authorId").unwrap(), &json!("user123"));
+    }
+
+    #[test]
+    fn test_eval_dbdelete_empty_results() {
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![json!({"_id": "1", "status": "published"})],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Delete with filter that matches nothing
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("status".to_string(), OperatorValue::Literal(json!("draft")));
+
+        let op = Operator::DbDelete(DbDeleteOp {
+            collection: "posts".to_string(),
+            filter,
+        });
+
+        let result = executor.eval_operator(&context, &op).unwrap();
+        let results_array = result.as_array().unwrap();
+
+        // Should return empty array
+        assert_eq!(results_array.len(), 0);
+    }
+
+    #[test]
+    fn test_eval_dbdelete_verifies_deletion() {
+        // Test that delete actually removes documents
+        let db = Box::leak(Box::new(MockDatabase::new().with_collection(
+            "posts",
+            vec![
+                json!({"_id": "1", "title": "Post 1"}),
+                json!({"_id": "2", "title": "Post 2"}),
+            ],
+        )));
+        let time = Box::leak(Box::new(FixedTimeProvider::new(
+            "2025-01-01T00:00:00Z",
+            1735689600,
+        )));
+        let request = Box::leak(Box::new(MockRequestContext::new()));
+        let executor = Executor::new(db, time, request);
+        let context = Context::new();
+
+        // Delete one document
+        let mut filter = std::collections::HashMap::new();
+        filter.insert("_id".to_string(), OperatorValue::Literal(json!("1")));
+
+        let delete_op = Operator::DbDelete(DbDeleteOp {
+            collection: "posts".to_string(),
+            filter,
+        });
+
+        executor.eval_operator(&context, &delete_op).unwrap();
+
+        // Query to verify it's gone
+        let query_op = Operator::DbQuery(DbQueryOp {
+            collection: "posts".to_string(),
+            filter: None,
+            select: None,
+            limit: None,
+            skip: None,
+            sort: None,
+        });
+
+        let results = executor.eval_operator(&context, &query_op).unwrap();
+        let results_array = results.as_array().unwrap();
+
+        // Should only have 1 document remaining
+        assert_eq!(results_array.len(), 1);
+        assert_eq!(results_array[0].get("_id").unwrap(), &json!("2"));
     }
 }

@@ -45,10 +45,10 @@ This document tracks the implementation status of the deck declarative web serve
 - ⏸️ `$reduce` - Aggregate/fold operation
 
 ### Database Operations
-- ⏸️ `$dbQuery` - Query documents (type defined, needs implementation)
-- ⏸️ `$dbInsert` - Insert document (type defined, needs implementation)
-- ⏸️ `$dbUpdate` - Update documents (type defined, needs implementation)
-- ⏸️ `$dbDelete` - Delete documents (type defined, needs implementation)
+- ✅ `$dbQuery` - Query documents (filtering, sorting, pagination, projection)
+- ✅ `$dbInsert` - Insert document (with ID generation)
+- ✅ `$dbUpdate` - Update documents (partial update with merge semantics)
+- ✅ `$dbDelete` - Delete documents (with audit trail)
 
 ### Utility Operators
 - ✅ `$merge` - Combine multiple objects
@@ -144,9 +144,9 @@ This document tracks the implementation status of the deck declarative web serve
 ### Unit Tests
 - ✅ Context path resolution (10 tests)
 - ✅ ExecutionError types (5 tests)
-- ✅ Executor basics (62 tests - includes comparison, logical, and validation operators)
-- ⏸️ All operator implementations
-- ⏸️ Database operations
+- ✅ Executor - comparison, logical, validation operators (62 tests)
+- ✅ Executor - database operators (27 tests: $dbQuery, $dbInsert, $dbUpdate, $dbDelete)
+- ⏸️ Remaining operator implementations (collection ops, math ops, etc.)
 - ⏸️ Middleware execution
 
 ### Integration Tests
