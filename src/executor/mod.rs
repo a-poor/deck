@@ -67,6 +67,8 @@ impl<'a> Executor<'a> {
         match operator {
             Operator::Get(op) => self.eval_get(context, &op.path),
 
+            Operator::JsonPath(op) => self.eval_jsonpath(context, &op.path),
+
             Operator::If(op) => {
                 // Evaluate condition
                 let condition = self.eval(context, &op.condition)?;
@@ -106,6 +108,24 @@ impl<'a> Executor<'a> {
             .get_path(path)
             .cloned()
             .ok_or_else(|| ExecutionError::path_not_found(path))
+    }
+
+    /// Evaluate $jsonPath operator - query context using JSONPath expression
+    fn eval_jsonpath(&self, context: &Context, path: &str) -> Result<Value, ExecutionError> {
+        use jsonpath_rust::JsonPath;
+
+        // Convert context to a single JSON object
+        let context_json = serde_json::to_value(context.variables())
+            .map_err(|e| ExecutionError::custom(format!("Failed to serialize context: {}", e)))?;
+
+        // Query using JSONPath trait method on Value
+        let results = context_json
+            .query(path)
+            .map_err(|e| ExecutionError::custom(format!("JSONPath query failed for '{}': {}", path, e)))?;
+
+        // Convert Vec<&Value> to Value::Array
+        let result_values: Vec<Value> = results.into_iter().map(|v| v.clone()).collect();
+        Ok(Value::Array(result_values))
     }
 
     /// Evaluate $merge operator - combine multiple objects
@@ -330,5 +350,118 @@ mod tests {
         assert!(Executor::is_truthy(&json!([1, 2, 3])));
         assert!(!Executor::is_truthy(&json!({})));
         assert!(Executor::is_truthy(&json!({"key": "value"})));
+    }
+
+    #[test]
+    fn test_eval_jsonpath_simple() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("user", json!({
+            "name": "Alice",
+            "email": "alice@example.com"
+        }));
+
+        let value = OperatorValue::Operator(Box::new(Operator::JsonPath(JsonPathOp {
+            path: "$.user.email".to_string(),
+        })));
+
+        let result = executor.eval(&context, &value).unwrap();
+        assert_eq!(result, json!(["alice@example.com"]));
+    }
+
+    #[test]
+    fn test_eval_jsonpath_wildcard() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("items", json!([
+            {"name": "Item 1", "price": 10},
+            {"name": "Item 2", "price": 20},
+            {"name": "Item 3", "price": 30}
+        ]));
+
+        let value = OperatorValue::Operator(Box::new(Operator::JsonPath(JsonPathOp {
+            path: "$.items[*].name".to_string(),
+        })));
+
+        let result = executor.eval(&context, &value).unwrap();
+        assert_eq!(result, json!(["Item 1", "Item 2", "Item 3"]));
+    }
+
+    #[test]
+    fn test_eval_jsonpath_filter() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("items", json!([
+            {"name": "Cheap", "price": 5},
+            {"name": "Expensive", "price": 50},
+            {"name": "Affordable", "price": 15}
+        ]));
+
+        let value = OperatorValue::Operator(Box::new(Operator::JsonPath(JsonPathOp {
+            path: "$.items[?(@.price < 20)].name".to_string(),
+        })));
+
+        let result = executor.eval(&context, &value).unwrap();
+        // Should return items with price < 20
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 2);
+        assert!(result_array.contains(&json!("Cheap")));
+        assert!(result_array.contains(&json!("Affordable")));
+    }
+
+    #[test]
+    fn test_eval_jsonpath_array_index() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("items", json!([
+            {"name": "First"},
+            {"name": "Second"},
+            {"name": "Third"}
+        ]));
+
+        let value = OperatorValue::Operator(Box::new(Operator::JsonPath(JsonPathOp {
+            path: "$.items[0].name".to_string(),
+        })));
+
+        let result = executor.eval(&context, &value).unwrap();
+        assert_eq!(result, json!(["First"]));
+    }
+
+    #[test]
+    fn test_eval_jsonpath_recursive_descent() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("data", json!({
+            "user": {
+                "name": "Alice",
+                "profile": {
+                    "name": "Alice Profile"
+                }
+            },
+            "admin": {
+                "name": "Bob"
+            }
+        }));
+
+        let value = OperatorValue::Operator(Box::new(Operator::JsonPath(JsonPathOp {
+            path: "$..name".to_string(),
+        })));
+
+        let result = executor.eval(&context, &value).unwrap();
+        // Should find all "name" fields at any depth
+        let result_array = result.as_array().unwrap();
+        assert_eq!(result_array.len(), 3);
+        assert!(result_array.contains(&json!("Alice")));
+        assert!(result_array.contains(&json!("Alice Profile")));
+        assert!(result_array.contains(&json!("Bob")));
+    }
+
+    #[test]
+    fn test_eval_jsonpath_empty_result() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("user", json!({"name": "Alice"}));
+
+        let value = OperatorValue::Operator(Box::new(Operator::JsonPath(JsonPathOp {
+            path: "$.user.missing".to_string(),
+        })));
+
+        let result = executor.eval(&context, &value).unwrap();
+        // Should return empty array when no matches
+        assert_eq!(result, json!([]));
     }
 }

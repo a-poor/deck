@@ -108,3 +108,6 @@ Key decisions still being evaluated (see design-docs/01.initial.md):
 - Middleware execution model (`$next` explicit vs implicit)
 - Advanced operator additions (`$join`, `$groupBy`, `$parallel`, etc.)
 - Configuration format (JSON vs JSON5/YAML/TOML)
+- Do your best to follow TDD where possible.
+- Do not alter failing tests in order to get them to pass. If the test implementation is correct you **must** correct the code not cheat by updating the test.
+- Keep track of overall progress in the @TODO.md file.

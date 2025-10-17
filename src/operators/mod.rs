@@ -10,7 +10,7 @@ mod collection;
 mod utility;
 
 pub use conditional::{IfOp, SwitchCase, SwitchOp};
-pub use data::GetOp;
+pub use data::{GetOp, JsonPathOp};
 pub use database::{DbDeleteOp, DbInsertOp, DbQueryOp, DbUpdateOp, SortOrder};
 pub use collection::{FilterOp, MapOp, ReduceOp};
 pub use utility::{ExistsOp, MergeOp, NowOp, RenderStringOp, ReturnOp, ValidateOp};
@@ -39,6 +39,8 @@ pub enum Operator {
     // Data access
     #[serde(rename = "$get")]
     Get(GetOp),
+    #[serde(rename = "$jsonPath")]
+    JsonPath(JsonPathOp),
 
     // Conditionals
     #[serde(rename = "$if")]
