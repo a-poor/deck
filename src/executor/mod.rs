@@ -94,6 +94,74 @@ impl<'a> Executor<'a> {
                 Ok(Value::String(self.time.now()))
             }
 
+            // Comparison operators
+            Operator::Eq { left, right } => {
+                let left_val = self.eval(context, left)?;
+                let right_val = self.eval(context, right)?;
+                Ok(Value::Bool(left_val == right_val))
+            }
+
+            Operator::Ne { left, right } => {
+                let left_val = self.eval(context, left)?;
+                let right_val = self.eval(context, right)?;
+                Ok(Value::Bool(left_val != right_val))
+            }
+
+            Operator::Gt { left, right } => {
+                let left_val = self.eval(context, left)?;
+                let right_val = self.eval(context, right)?;
+                Self::compare_values(&left_val, &right_val, |cmp| cmp.is_gt())
+            }
+
+            Operator::Gte { left, right } => {
+                let left_val = self.eval(context, left)?;
+                let right_val = self.eval(context, right)?;
+                Self::compare_values(&left_val, &right_val, |cmp| cmp.is_ge())
+            }
+
+            Operator::Lt { left, right } => {
+                let left_val = self.eval(context, left)?;
+                let right_val = self.eval(context, right)?;
+                Self::compare_values(&left_val, &right_val, |cmp| cmp.is_lt())
+            }
+
+            Operator::Lte { left, right } => {
+                let left_val = self.eval(context, left)?;
+                let right_val = self.eval(context, right)?;
+                Self::compare_values(&left_val, &right_val, |cmp| cmp.is_le())
+            }
+
+            // Logical operators
+            Operator::And { conditions } => {
+                // Return true if all conditions are truthy (short-circuit on first false)
+                // Empty array returns true (vacuous truth)
+                for condition in conditions {
+                    let value = self.eval(context, condition)?;
+                    if !Self::is_truthy(&value) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+
+            Operator::Or { conditions } => {
+                // Return true if any condition is truthy (short-circuit on first true)
+                // Empty array returns false
+                for condition in conditions {
+                    let value = self.eval(context, condition)?;
+                    if Self::is_truthy(&value) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+
+            Operator::Not { condition } => {
+                // Return the negation of the condition's truthiness
+                let value = self.eval(context, condition)?;
+                Ok(Value::Bool(!Self::is_truthy(&value)))
+            }
+
             // TODO: Implement remaining operators
             _ => Err(ExecutionError::custom(format!(
                 "Operator not yet implemented: {:?}",
@@ -177,6 +245,44 @@ impl<'a> Executor<'a> {
             Value::Array(_) => "array",
             Value::Object(_) => "object",
         }
+    }
+
+    /// Compare two values for ordering operations (>, >=, <, <=)
+    ///
+    /// Returns Ok(Bool) if values are comparable, or TypeError if types don't match
+    /// or can't be ordered.
+    fn compare_values<F>(left: &Value, right: &Value, compare: F) -> Result<Value, ExecutionError>
+    where
+        F: FnOnce(std::cmp::Ordering) -> bool,
+    {
+
+        let ordering = match (left, right) {
+            // Numbers
+            (Value::Number(l), Value::Number(r)) => {
+                let l_f64 = l.as_f64().ok_or_else(|| {
+                    ExecutionError::custom("Failed to convert number to f64".to_string())
+                })?;
+                let r_f64 = r.as_f64().ok_or_else(|| {
+                    ExecutionError::custom("Failed to convert number to f64".to_string())
+                })?;
+
+                l_f64.partial_cmp(&r_f64).ok_or_else(|| {
+                    ExecutionError::custom("Cannot compare NaN values".to_string())
+                })?
+            }
+            // Strings (lexicographic comparison)
+            (Value::String(l), Value::String(r)) => l.cmp(r),
+            // Type mismatch
+            _ => {
+                return Err(ExecutionError::type_error_with_types(
+                    "Cannot compare values of different types",
+                    Self::type_name(left),
+                    Self::type_name(right),
+                ));
+            }
+        };
+
+        Ok(Value::Bool(compare(ordering)))
     }
 }
 
@@ -463,5 +569,622 @@ mod tests {
         let result = executor.eval(&context, &value).unwrap();
         // Should return empty array when no matches
         assert_eq!(result, json!([]));
+    }
+
+    // Comparison operator tests
+
+    #[test]
+    fn test_eval_eq_numbers() {
+        let (executor, context) = create_test_executor();
+
+        // 5 == 5 should be true
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 5 == 3 should be false
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(3)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_eq_strings() {
+        let (executor, context) = create_test_executor();
+
+        // "hello" == "hello"
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!("hello")),
+            right: OperatorValue::Literal(json!("hello")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // "hello" == "world"
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!("hello")),
+            right: OperatorValue::Literal(json!("world")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_eq_booleans() {
+        let (executor, context) = create_test_executor();
+
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(true)),
+            right: OperatorValue::Literal(json!(true)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(true)),
+            right: OperatorValue::Literal(json!(false)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_eq_null() {
+        let (executor, context) = create_test_executor();
+
+        // null == null should be true
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(null)),
+            right: OperatorValue::Literal(json!(null)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // null == 5 should be false
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(null)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_eq_type_mismatch() {
+        let (executor, context) = create_test_executor();
+
+        // 5 == "5" should be false (no type coercion)
+        let op = Operator::Eq {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!("5")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_eq_with_operators() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("count", json!(42));
+
+        // $get("count") == 42
+        let op = Operator::Eq {
+            left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                path: "count".to_string(),
+            }))),
+            right: OperatorValue::Literal(json!(42)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_ne() {
+        let (executor, context) = create_test_executor();
+
+        // 5 != 3 should be true
+        let op = Operator::Ne {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(3)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 5 != 5 should be false
+        let op = Operator::Ne {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_gt_numbers() {
+        let (executor, context) = create_test_executor();
+
+        // 5 > 3 should be true
+        let op = Operator::Gt {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(3)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 3 > 5 should be false
+        let op = Operator::Gt {
+            left: OperatorValue::Literal(json!(3)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+
+        // 5 > 5 should be false
+        let op = Operator::Gt {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_gt_strings() {
+        let (executor, context) = create_test_executor();
+
+        // "b" > "a" (lexicographic)
+        let op = Operator::Gt {
+            left: OperatorValue::Literal(json!("b")),
+            right: OperatorValue::Literal(json!("a")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // "a" > "b"
+        let op = Operator::Gt {
+            left: OperatorValue::Literal(json!("a")),
+            right: OperatorValue::Literal(json!("b")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_gte() {
+        let (executor, context) = create_test_executor();
+
+        // 5 >= 3
+        let op = Operator::Gte {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(3)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 5 >= 5
+        let op = Operator::Gte {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 3 >= 5
+        let op = Operator::Gte {
+            left: OperatorValue::Literal(json!(3)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_lt() {
+        let (executor, context) = create_test_executor();
+
+        // 3 < 5
+        let op = Operator::Lt {
+            left: OperatorValue::Literal(json!(3)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 5 < 3
+        let op = Operator::Lt {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(3)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+
+        // 5 < 5
+        let op = Operator::Lt {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_lte() {
+        let (executor, context) = create_test_executor();
+
+        // 3 <= 5
+        let op = Operator::Lte {
+            left: OperatorValue::Literal(json!(3)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 5 <= 5
+        let op = Operator::Lte {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(5)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // 5 <= 3
+        let op = Operator::Lte {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!(3)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_comparison_type_mismatch_error() {
+        let (executor, context) = create_test_executor();
+
+        // Comparing number to string with > should error
+        let op = Operator::Gt {
+            left: OperatorValue::Literal(json!(5)),
+            right: OperatorValue::Literal(json!("hello")),
+        };
+        let result = executor.eval_operator(&context, &op);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ExecutionError::TypeError { .. }));
+    }
+
+    // Logical operator tests
+
+    #[test]
+    fn test_eval_and_all_true() {
+        let (executor, context) = create_test_executor();
+
+        // [true, true, true] should return true
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Literal(json!(true)),
+                OperatorValue::Literal(json!(true)),
+                OperatorValue::Literal(json!(true)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_and_some_false() {
+        let (executor, context) = create_test_executor();
+
+        // [true, false, true] should return false
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Literal(json!(true)),
+                OperatorValue::Literal(json!(false)),
+                OperatorValue::Literal(json!(true)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_and_all_false() {
+        let (executor, context) = create_test_executor();
+
+        // [false, false] should return false
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Literal(json!(false)),
+                OperatorValue::Literal(json!(false)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_and_empty() {
+        let (executor, context) = create_test_executor();
+
+        // Empty conditions should return true (vacuous truth)
+        let op = Operator::And {
+            conditions: vec![],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_and_with_truthy_values() {
+        let (executor, context) = create_test_executor();
+
+        // [1, "hello", [1,2,3]] are all truthy
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Literal(json!(1)),
+                OperatorValue::Literal(json!("hello")),
+                OperatorValue::Literal(json!([1, 2, 3])),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_and_with_falsy_values() {
+        let (executor, context) = create_test_executor();
+
+        // [1, 0, "hello"] - 0 is falsy
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Literal(json!(1)),
+                OperatorValue::Literal(json!(0)),
+                OperatorValue::Literal(json!("hello")),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_and_with_nested_operators() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("x", json!(10));
+
+        // [$get("x") == 10, $get("x") > 5]
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Operator(Box::new(Operator::Eq {
+                    left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "x".to_string(),
+                    }))),
+                    right: OperatorValue::Literal(json!(10)),
+                })),
+                OperatorValue::Operator(Box::new(Operator::Gt {
+                    left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "x".to_string(),
+                    }))),
+                    right: OperatorValue::Literal(json!(5)),
+                })),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_or_any_true() {
+        let (executor, context) = create_test_executor();
+
+        // [false, true, false] should return true
+        let op = Operator::Or {
+            conditions: vec![
+                OperatorValue::Literal(json!(false)),
+                OperatorValue::Literal(json!(true)),
+                OperatorValue::Literal(json!(false)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_or_all_false() {
+        let (executor, context) = create_test_executor();
+
+        // [false, false, false] should return false
+        let op = Operator::Or {
+            conditions: vec![
+                OperatorValue::Literal(json!(false)),
+                OperatorValue::Literal(json!(false)),
+                OperatorValue::Literal(json!(false)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_or_all_true() {
+        let (executor, context) = create_test_executor();
+
+        // [true, true] should return true
+        let op = Operator::Or {
+            conditions: vec![
+                OperatorValue::Literal(json!(true)),
+                OperatorValue::Literal(json!(true)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_or_empty() {
+        let (executor, context) = create_test_executor();
+
+        // Empty conditions should return false
+        let op = Operator::Or {
+            conditions: vec![],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_or_with_truthy_values() {
+        let (executor, context) = create_test_executor();
+
+        // [0, "", 1] - last one is truthy
+        let op = Operator::Or {
+            conditions: vec![
+                OperatorValue::Literal(json!(0)),
+                OperatorValue::Literal(json!("")),
+                OperatorValue::Literal(json!(1)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_or_with_nested_operators() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("y", json!(3));
+
+        // [$get("y") == 10, $get("y") < 5] - second condition is true
+        let op = Operator::Or {
+            conditions: vec![
+                OperatorValue::Operator(Box::new(Operator::Eq {
+                    left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "y".to_string(),
+                    }))),
+                    right: OperatorValue::Literal(json!(10)),
+                })),
+                OperatorValue::Operator(Box::new(Operator::Lt {
+                    left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "y".to_string(),
+                    }))),
+                    right: OperatorValue::Literal(json!(5)),
+                })),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_not_true() {
+        let (executor, context) = create_test_executor();
+
+        // !true should return false
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!(true)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_not_false() {
+        let (executor, context) = create_test_executor();
+
+        // !false should return true
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!(false)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_not_truthy_values() {
+        let (executor, context) = create_test_executor();
+
+        // !1 should be false (1 is truthy)
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!(1)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+
+        // !"hello" should be false ("hello" is truthy)
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!("hello")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn test_eval_not_falsy_values() {
+        let (executor, context) = create_test_executor();
+
+        // !0 should be true (0 is falsy)
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!(0)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // !"" should be true ("" is falsy)
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!("")),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+
+        // !null should be true
+        let op = Operator::Not {
+            condition: OperatorValue::Literal(json!(null)),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_not_with_operator() {
+        let (executor, context) = create_test_executor();
+        let context = context.with_var("a", json!(5));
+
+        // !($get("a") == 10) should be true
+        let op = Operator::Not {
+            condition: OperatorValue::Operator(Box::new(Operator::Eq {
+                left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                    path: "a".to_string(),
+                }))),
+                right: OperatorValue::Literal(json!(10)),
+            })),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_combined_and_or() {
+        let (executor, context) = create_test_executor();
+
+        // $and([$or([false, true]), true])
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Operator(Box::new(Operator::Or {
+                    conditions: vec![
+                        OperatorValue::Literal(json!(false)),
+                        OperatorValue::Literal(json!(true)),
+                    ],
+                })),
+                OperatorValue::Literal(json!(true)),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_combined_not_and() {
+        let (executor, context) = create_test_executor();
+
+        // $not($and([true, false]))
+        let op = Operator::Not {
+            condition: OperatorValue::Operator(Box::new(Operator::And {
+                conditions: vec![
+                    OperatorValue::Literal(json!(true)),
+                    OperatorValue::Literal(json!(false)),
+                ],
+            })),
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn test_eval_complex_boolean_expression() {
+        let (executor, context) = create_test_executor();
+        let context = context
+            .with_var("age", json!(25))
+            .with_var("isStudent", json!(false));
+
+        // $and([
+        //   $or([$get("age") >= 18, $get("isStudent")]),
+        //   $not($get("isStudent"))
+        // ])
+        // This should be true because: (25 >= 18 OR false) AND (!false) = true AND true = true
+        let op = Operator::And {
+            conditions: vec![
+                OperatorValue::Operator(Box::new(Operator::Or {
+                    conditions: vec![
+                        OperatorValue::Operator(Box::new(Operator::Gte {
+                            left: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                                path: "age".to_string(),
+                            }))),
+                            right: OperatorValue::Literal(json!(18)),
+                        })),
+                        OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                            path: "isStudent".to_string(),
+                        }))),
+                    ],
+                })),
+                OperatorValue::Operator(Box::new(Operator::Not {
+                    condition: OperatorValue::Operator(Box::new(Operator::Get(GetOp {
+                        path: "isStudent".to_string(),
+                    }))),
+                })),
+            ],
+        };
+        assert_eq!(executor.eval_operator(&context, &op).unwrap(), json!(true));
     }
 }

@@ -59,17 +59,17 @@ This document tracks the implementation status of the deck declarative web serve
 - ⏸️ `$validate` - JSON Schema validation
 
 ### Comparison Operators
-- ⏸️ `$eq` - Equality
-- ⏸️ `$ne` - Not equal
-- ⏸️ `$gt` - Greater than
-- ⏸️ `$gte` - Greater than or equal
-- ⏸️ `$lt` - Less than
-- ⏸️ `$lte` - Less than or equal
+- ✅ `$eq` - Equality
+- ✅ `$ne` - Not equal
+- ✅ `$gt` - Greater than
+- ✅ `$gte` - Greater than or equal
+- ✅ `$lt` - Less than
+- ✅ `$lte` - Less than or equal
 
 ### Logical Operators
-- ⏸️ `$and` - Logical AND
-- ⏸️ `$or` - Logical OR
-- ⏸️ `$not` - Logical NOT
+- ✅ `$and` - Logical AND
+- ✅ `$or` - Logical OR
+- ✅ `$not` - Logical NOT
 
 ### Math Operators
 - ⏸️ `$add` - Addition
@@ -144,7 +144,7 @@ This document tracks the implementation status of the deck declarative web serve
 ### Unit Tests
 - ✅ Context path resolution (10 tests)
 - ✅ ExecutionError types (5 tests)
-- ✅ Executor basics (16 tests)
+- ✅ Executor basics (50 tests - includes comparison and logical operators)
 - ⏸️ All operator implementations
 - ⏸️ Database operations
 - ⏸️ Middleware execution
@@ -188,14 +188,16 @@ This document tracks the implementation status of the deck declarative web serve
 
 ## Next Immediate Steps (Recommended Order)
 
-1. **Comparison Operators** (`$eq`, `$gt`, etc.) - Needed for filters
-2. **Collection Operators** (`$map`, `$filter`) - Core functionality
-3. **String Rendering** (`$renderString`) - Useful utility
-4. **Switch Statement** (`$switch`) - Complete conditionals
-5. **Database Operations** - Core feature
-6. **Basic HTTP Server** - Get something running end-to-end
-7. **Middleware Execution** - Complete request handling
-8. **Remaining Operators** - Fill in the gaps
+1. ✅ ~~**Comparison Operators** (`$eq`, `$gt`, etc.) - Needed for filters~~
+2. ✅ ~~**Logical Operators** (`$and`, `$or`, `$not`) - Needed for complex conditions~~
+3. **Collection Operators** (`$map`, `$filter`) - Core functionality
+4. **Math Operators** (`$add`, `$subtract`, `$multiply`, `$divide`) - Basic arithmetic
+5. **String Rendering** (`$renderString`) - Useful utility
+6. **Switch Statement** (`$switch`) - Complete conditionals
+7. **Database Operations** - Core feature
+8. **Basic HTTP Server** - Get something running end-to-end
+9. **Middleware Execution** - Complete request handling
+10. **Remaining Operators** - Fill in the gaps
 
 ---
 
