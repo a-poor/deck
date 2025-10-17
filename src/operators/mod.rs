@@ -11,7 +11,7 @@ mod utility;
 
 pub use conditional::{IfOp, SwitchCase, SwitchOp};
 pub use data::GetOp;
-pub use database::{DbDeleteOp, DbInsertOp, DbQueryOp, DbUpdateOp};
+pub use database::{DbDeleteOp, DbInsertOp, DbQueryOp, DbUpdateOp, SortOrder};
 pub use collection::{FilterOp, MapOp, ReduceOp};
 pub use utility::{ExistsOp, MergeOp, NowOp, RenderStringOp, ReturnOp, ValidateOp};
 
