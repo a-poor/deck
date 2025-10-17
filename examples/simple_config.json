@@ -1,0 +1,40 @@
+{
+  "routes": [
+    {
+      "path": "/api/posts/:id",
+      "method": "GET",
+      "pipeline": [
+        {
+          "name": "post",
+          "value": {
+            "$dbQuery": {
+              "collection": "posts",
+              "filter": {
+                "id": { "$get": "params.id" }
+              }
+            }
+          }
+        },
+        {
+          "name": "response",
+          "value": {
+            "$if": {
+              "condition": { "$exists": { "$get": "post" } },
+              "then": { "$get": "post" },
+              "else": {
+                "$return": {
+                  "status": 404,
+                  "body": { "error": "Not found" }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": { "$get": "response" }
+      }
+    }
+  ]
+}

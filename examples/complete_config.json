@@ -1,0 +1,75 @@
+{
+  "database": {
+    "schemas": {
+      "posts": {
+        "fields": {
+          "id": { "type": "string", "required": true, "primary": true },
+          "title": { "type": "string", "required": true },
+          "body": { "type": "string", "required": true },
+          "authorId": { "type": "string", "required": true },
+          "published": { "type": "boolean", "default": false },
+          "createdAt": { "type": "datetime", "required": true }
+        }
+      }
+    }
+  },
+  "middleware": {
+    "authenticate": {
+      "pipeline": [
+        {
+          "name": "user",
+          "value": {
+            "$if": {
+              "condition": { "$exists": { "$get": "headers.authorization" } },
+              "then": { "$get": "headers.authorization" },
+              "else": { "$return": { "status": 401, "body": { "error": "Unauthorized" } } }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "routes": [
+    {
+      "path": "/api/v1/posts",
+      "method": "POST",
+      "middleware": ["authenticate"],
+      "pipeline": [
+        {
+          "value": {
+            "$validate": {
+              "data": { "$get": "body" },
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string", "minLength": 1 },
+                  "body": { "type": "string" }
+                },
+                "required": ["title", "body"]
+              }
+            }
+          }
+        },
+        {
+          "name": "newPost",
+          "value": {
+            "$dbInsert": {
+              "collection": "posts",
+              "document": {
+                "title": { "$get": "body.title" },
+                "body": { "$get": "body.body" },
+                "authorId": { "$get": "user.id" },
+                "published": false
+              },
+              "validate": true
+            }
+          }
+        }
+      ],
+      "response": {
+        "status": 201,
+        "body": { "$get": "newPost" }
+      }
+    }
+  ]
+}
